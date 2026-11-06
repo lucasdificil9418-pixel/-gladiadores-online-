@@ -58,6 +58,7 @@ function close(c) {
   if (c.closed) return;
   c.closed = true;
   clients.delete(c);
+  unqueue(c);
   leave(c);
   try { c.socket.end(Buffer.from([0x88, 0])); } catch (e) {}
   try { c.socket.destroy(); } catch (e) {}
@@ -86,9 +87,54 @@ function leave(c) {
   c.room = null;
 }
 
+// ---------- buscador de rivales (v9.24) ----------
+// Cada jugador busca en su arena (0 = Arena I ... 4 = Arena V). Se juntan dos de la misma arena;
+// si alguien espera más de 20 s, se lo junta con alguien de una arena vecina.
+const queue = []; // { c, arena, since }
+
+function unqueue(c) {
+  const i = queue.findIndex((q) => q.c === c);
+  if (i >= 0) queue.splice(i, 1);
+}
+
+function pair(a, b) {
+  unqueue(a.c); unqueue(b.c);
+  const code = newCode();
+  if (!code) return;
+  rooms.set(code, { host: a.c, guest: b.c, created: Date.now() });
+  a.c.room = code; b.c.room = code;
+  send(a.c, { t: "matched", code, host: true, arena: a.arena });
+  send(b.c, { t: "matched", code, host: false, arena: a.arena });
+}
+
+function tryMatch(q, maxGap) {
+  for (const o of queue) {
+    if (o === q || o.c.closed) continue;
+    if (Math.abs(o.arena - q.arena) <= maxGap) {
+      // el que esperaba primero hace de anfitrión
+      if (o.since <= q.since) pair(o, q); else pair(q, o);
+      return true;
+    }
+  }
+  return false;
+}
+
+function inArena(n) { return queue.filter((q) => q.arena === n).length; }
+
 function onMessage(c, text) {
   let m;
   try { m = JSON.parse(text); } catch (e) { return; }
+  if (m.t === "queue") {
+    leave(c);
+    unqueue(c);
+    const q = { c, arena: Math.max(0, Math.min(9, parseInt(m.arena) || 0)), since: Date.now() };
+    queue.push(q);
+    if (!tryMatch(q, 0)) send(c, { t: "queued", arena: q.arena, waiting: inArena(q.arena), online: clients.size });
+    return;
+  } else if (m.t === "unqueue") {
+    unqueue(c);
+    return;
+  }
   if (m.t === "create") {
     leave(c);
     const code = newCode();
@@ -123,7 +169,7 @@ function onMessage(c, text) {
 // ---------- HTTP + upgrade ----------
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-  res.end("Servidor de Gladiadores funcionando. Salas abiertas: " + rooms.size + " · Jugadores conectados: " + clients.size);
+  res.end("Servidor de Gladiadores funcionando. Salas abiertas: " + rooms.size + " · Jugadores conectados: " + clients.size + " · Buscando rival: " + queue.length);
 });
 
 server.on("upgrade", (req, socket) => {
@@ -138,6 +184,16 @@ server.on("upgrade", (req, socket) => {
   socket.on("close", () => close(c));
   socket.on("error", () => close(c));
 });
+
+// los que esperan mucho se juntan con alguien de una arena vecina
+setInterval(() => {
+  const now = Date.now();
+  for (const q of [...queue]) {
+    if (!queue.includes(q)) continue;
+    if (now - q.since > 20000) tryMatch(q, 1);
+    else if (queue.includes(q)) send(q.c, { t: "queued", arena: q.arena, waiting: inArena(q.arena), online: clients.size });
+  }
+}, 4000);
 
 // limpiar conexiones muertas y salas viejas
 setInterval(() => {
