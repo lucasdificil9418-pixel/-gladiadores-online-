@@ -89,7 +89,7 @@ function leave(c) {
 
 // ---------- buscador de rivales (v9.24) ----------
 // Cada jugador busca en su arena (0 = Arena I ... 4 = Arena V). Se juntan dos de la misma arena;
-// si alguien espera más de 20 s, se lo junta con alguien de una arena vecina.
+// si nadie de su arena aparece, la búsqueda se va abriendo cada 10 s (vecina, 2 arenas, cualquiera).
 const queue = []; // { c, arena, since }
 
 function unqueue(c) {
@@ -190,8 +190,10 @@ setInterval(() => {
   const now = Date.now();
   for (const q of [...queue]) {
     if (!queue.includes(q)) continue;
-    if (now - q.since > 20000) tryMatch(q, 1);
-    else if (queue.includes(q)) send(q.c, { t: "queued", arena: q.arena, waiting: inArena(q.arena), online: clients.size });
+    // cuanto más espera, más amplia la búsqueda: 10 s → arena vecina, 20 s → 2 de distancia, 30 s → cualquiera
+    const gap = Math.min(9, Math.floor((now - q.since) / 10000));
+    if (gap > 0 && tryMatch(q, gap)) continue;
+    if (queue.includes(q)) send(q.c, { t: "queued", arena: q.arena, waiting: inArena(q.arena), online: clients.size });
   }
 }, 4000);
 
