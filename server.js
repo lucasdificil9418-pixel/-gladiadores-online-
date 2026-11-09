@@ -166,8 +166,56 @@ function onMessage(c, text) {
   }
 }
 
+// ---------- ranking de las HORDAS (v9.30) ----------
+// Cada jugador manda su mejor horda; se guarda el récord de cada uno (en memoria y en un archivo).
+// GET /hordas -> los 10 mejores. POST /hordas {id, name, waves} -> tu puesto y los 10 mejores.
+const fs = require("fs");
+const RANK_FILE = process.env.RANK_FILE || "ranking_hordas.json";
+let ranking = {}; // id -> { name, waves, t }
+try { ranking = JSON.parse(fs.readFileSync(RANK_FILE, "utf8")) || {}; } catch (e) { ranking = {}; }
+
+function rankList() {
+  return Object.entries(ranking)
+    .map(([id, r]) => ({ id, name: r.name, waves: r.waves, t: r.t }))
+    .sort((a, b) => b.waves - a.waves || a.t - b.t);
+}
+
+function cleanName(s) {
+  s = String(s || "").replace(/[^\p{L}\p{N} _.-]/gu, "").trim().slice(0, 16);
+  return s || "Gladiador";
+}
+
+function handleRanking(req, res) {
+  const out = (code, obj) => {
+    res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" });
+    res.end(JSON.stringify(obj));
+  };
+  if (req.method === "GET") {
+    const list = rankList();
+    return out(200, { total: list.length, top: list.slice(0, 10).map((r) => ({ name: r.name, waves: r.waves })) });
+  }
+  if (req.method !== "POST") return out(405, { error: "metodo" });
+  let body = "";
+  req.on("data", (d) => { body += d; if (body.length > 2000) req.destroy(); });
+  req.on("end", () => {
+    let m;
+    try { m = JSON.parse(body); } catch (e) { return out(400, { error: "json" }); }
+    const id = String(m.id || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24);
+    const waves = Math.max(0, Math.min(999, parseInt(m.waves) || 0));
+    if (!id) return out(400, { error: "id" });
+    const prev = ranking[id];
+    if (!prev || waves > prev.waves) ranking[id] = { name: cleanName(m.name), waves, t: Date.now() };
+    else prev.name = cleanName(m.name);
+    try { fs.writeFileSync(RANK_FILE, JSON.stringify(ranking)); } catch (e) {}
+    const list = rankList();
+    const pos = list.findIndex((r) => r.id === id) + 1;
+    out(200, { rank: pos, total: list.length, best: ranking[id].waves, top: list.slice(0, 10).map((r) => ({ name: r.name, waves: r.waves })) });
+  });
+}
+
 // ---------- HTTP + upgrade ----------
 const server = http.createServer((req, res) => {
+  if (req.url && req.url.startsWith("/hordas")) return handleRanking(req, res);
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
   res.end("Servidor de Gladiadores funcionando. Salas abiertas: " + rooms.size + " · Jugadores conectados: " + clients.size + " · Buscando rival: " + queue.length);
 });
