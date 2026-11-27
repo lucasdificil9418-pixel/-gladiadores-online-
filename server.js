@@ -213,9 +213,60 @@ function handleRanking(req, res) {
   });
 }
 
+// ---------- ranking del ONLINE (v1.1) ----------
+// Cada jugador manda sus victorias de arena (y su arena, luchador y nivel).
+// GET /arenas -> los 50 mejores. POST /arenas {id, name, wins, arena, char, level} -> tu puesto y los 50 mejores.
+const ARENA_FILE = process.env.ARENA_FILE || "ranking_arenas.json";
+let arenaRank = {}; // id -> { name, wins, arena, char, level, t }
+try { arenaRank = JSON.parse(fs.readFileSync(ARENA_FILE, "utf8")) || {}; } catch (e) { arenaRank = {}; }
+const CHARS_OK = ["player", "tracio", "hoplomaco", "reciario", "murmillo", "dimachaerus", "sagitario"];
+
+function arenaList() {
+  return Object.entries(arenaRank)
+    .map(([id, r]) => ({ id, ...r }))
+    .sort((a, b) => b.wins - a.wins || b.level - a.level || a.t - b.t);
+}
+
+function pubRow(r) {
+  return { name: r.name, wins: r.wins, arena: r.arena, char: r.char, level: r.level };
+}
+
+function handleArenas(req, res) {
+  const out = (code, obj) => {
+    res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" });
+    res.end(JSON.stringify(obj));
+  };
+  if (req.method === "GET") {
+    const list = arenaList();
+    return out(200, { total: list.length, top: list.slice(0, 50).map(pubRow) });
+  }
+  if (req.method !== "POST") return out(405, { error: "metodo" });
+  let body = "";
+  req.on("data", (d) => { body += d; if (body.length > 2000) req.destroy(); });
+  req.on("end", () => {
+    let m;
+    try { m = JSON.parse(body); } catch (e) { return out(400, { error: "json" }); }
+    const id = String(m.id || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24);
+    if (!id) return out(400, { error: "id" });
+    arenaRank[id] = {
+      name: cleanName(m.name),
+      wins: Math.max(0, Math.min(999, parseInt(m.wins) || 0)),
+      arena: Math.max(0, Math.min(6, parseInt(m.arena) || 0)),
+      char: CHARS_OK.includes(String(m.char)) ? String(m.char) : "player",
+      level: Math.max(1, Math.min(10, parseInt(m.level) || 1)),
+      t: Date.now(),
+    };
+    try { fs.writeFileSync(ARENA_FILE, JSON.stringify(arenaRank)); } catch (e) {}
+    const list = arenaList();
+    const pos = list.findIndex((r) => r.id === id) + 1;
+    out(200, { rank: pos, total: list.length, top: list.slice(0, 50).map(pubRow) });
+  });
+}
+
 // ---------- HTTP + upgrade ----------
 const server = http.createServer((req, res) => {
   if (req.url && req.url.startsWith("/hordas")) return handleRanking(req, res);
+  if (req.url && req.url.startsWith("/arenas")) return handleArenas(req, res);
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
   res.end("Servidor de Gladiadores funcionando. Salas abiertas: " + rooms.size + " · Jugadores conectados: " + clients.size + " · Buscando rival: " + queue.length);
 });
